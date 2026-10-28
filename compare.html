@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Piiicker — Проверки</title>
+<link rel="stylesheet" href="/shared.css">
+</head>
+<body>
+
+<h1>
+  🔍 Проверки
+  <span class="who" id="who">…</span>
+  <span class="dev" id="dev"></span>
+  <div class="menu-wrap">
+    <button class="b-menu" onclick="toggleMenu(event)">☰</button>
+    <div class="menu" id="menu">
+      <a href="/tsd">📝 Пикер</a>
+      <a href="/compare" class="current">🔍 Проверки</a>
+      <div class="label">Показывать столбец</div>
+      <div id="colMenu"></div>
+      <div class="item" onclick="switchUser()">👤 Сменить пользователя</div>
+    </div>
+  </div>
+</h1>
+
+<input type="text" id="scan" class="scan"
+       placeholder="Пикайте для проверки…"
+       autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<div class="status" id="status"><span id="statusText">Подключение…</span></div>
+
+<div class="card" id="card" style="display:none">
+  <div class="name" id="cardName"></div>
+  <div class="code" id="cardCode"></div>
+  <div class="col-name" id="colName"></div>
+  <div class="value" id="cardValue"></div>
+</div>
+
+<div class="toolbar">
+  <button class="b-numpad" id="btnNumpad" onclick="toggleNumpad()">🔢 Цифры</button>
+  <button class="b-mismatch" onclick="markMismatch()">⚠ Не совпадает</button>
+</div>
+
+<div class="numpad" id="numpad" style="display:none">
+  <div class="numpad-grid">
+    <button class="numpad-btn" data-k="7">7</button>
+    <button class="numpad-btn" data-k="8">8</button>
+    <button class="numpad-btn" data-k="9">9</button>
+    <button class="numpad-btn" data-k="4">4</button>
+    <button class="numpad-btn" data-k="5">5</button>
+    <button class="numpad-btn" data-k="6">6</button>
+    <button class="numpad-btn" data-k="1">1</button>
+    <button class="numpad-btn" data-k="2">2</button>
+    <button class="numpad-btn" data-k="3">3</button>
+    <button class="numpad-btn numpad-bs" data-k="bs" aria-label="Удалить">⌫</button>
+    <button class="numpad-btn" data-k="0">0</button>
+    <button class="numpad-btn numpad-enter" data-k="enter" aria-label="Ввод">⏎</button>
+  </div>
+</div>
+
+<script>
+const NUMPAD_KEY = 'piiicker_numpad';
+const COL_KEY = 'piiicker_compare_col';
+const DEV_KEY = 'piiicker_device';
+const DIAG_KEY = 'piiicker_diag_compare';
+const RETRY_MS = 8000;
+const NET_TIMEOUT = 5000;
+
+let deviceId = localStorage.getItem(DEV_KEY);
+if (!deviceId) {
+  const r = () => Math.random().toString(36).slice(2, 6).toUpperCase();
+  deviceId = r() + '-' + r();
+  localStorage.setItem(DEV_KEY, deviceId);
+}
+document.getElementById('dev').textContent = deviceId;
+
+let employee = { code: '—', name: '' };
+let catalogCols = [];
+let catalogRows = {};
+let catalogNameCol = '';   // имя второго столбца — что показывать как название
+let currentCol = localStorage.getItem(COL_KEY) || '';
+let currentScan = null;
+let pendingQueue = [];
+let wasOffline = false;
+let diagQueue = [];
+
+const input       = document.getElementById('scan');
+const statusEl    = document.getElementById('status');
+const statusTxt   = document.getElementById('statusText');
+const whoEl       = document.getElementById('who');
+const card        = document.getElementById('card');
+const cardName    = document.getElementById('cardName');
+const cardCode    = document.getElementById('cardCode');
+const cardValue   = document.getElementById('cardValue');
+const colName     = document.getElementById('colName');
+const colMenu     = document.getElementById('colMenu');
+const numpad      = document.getElementById('numpad');
+const btnNumpad   = document.getElementById('btnNumpad');
+const menu        = document.getElementById('menu');
+
+function pad(n) { return n < 10 ? '0' + n : n; }
+function now() {
+  const d = new Date();
+  const ms = String(d.getMilliseconds()).padStart(3, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + ms;
+}
+function hhmmss() {
+  const d = new Date();
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+function beep(high) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(high ? 880 : 400, ctx.currentTime);
+    gain.gain.setValueAtTime(0.08, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.12);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime + 0.12);
+  } catch (e) {}
+}
+function focusInput() {
+  if (document.activeElement !== input) input.focus();
+}
+async function fetchT(url, opts = {}, ms = NET_TIMEOUT) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, Object.assign({}, opts, {
+      credentials: 'same-origin',
+      signal: ctrl.signal,
+      headers: Object.assign({ 'X-Device-Id': deviceId }, (opts.headers || {}))
+    }));
+  } finally {
+    clearTimeout(t);
+  }
+}
+function saveDiag() {
+  try { localStorage.setItem(DIAG_KEY, JSON.stringify(diagQueue)); } catch (e) {}
+}
+function loadDiag() {
+  try {
+    const raw = localStorage.getItem(DIAG_KEY);
+    diagQueue = raw ? JSON.parse(raw) : [];
+  } catch (e) { diagQueue = []; }
+}
+function queueDiag(op) {
+  diagQueue.push({ op, detail: '' });
+  saveDiag();
+}
+async function flushDiag() {
+  if (!diagQueue.length) return;
+  try {
+    const r = await fetchT('/api/diag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events: diagQueue })
+    });
+    if (r.ok) { diagQueue = []; saveDiag(); }
+  } catch (e) {}
+}
+function setStatus(kind, text) {
+  statusEl.className = 'status ' + kind;
+  statusTxt.textContent = text;
+}
+function statusOk() {
+  setStatus('ok', '✅ Готово в ' + hhmmss() + ' · ' + (employee.name || employee.code));
+}
+function statusSaving() { setStatus('warn', '⏳ Сохранение…'); }
+function statusOffline() {
+  setStatus('err', '❌ Нет связи с сервером' +
+    (pendingQueue.length ? ' · в очереди: ' + pendingQueue.length : '') +
+    '. Повтор автоматически…');
+}
+
+function updateWho() {
+  whoEl.textContent = employee.name || 'Сотрудник';
+}
+
+function buildColMenu() {
+  colMenu.innerHTML = '';
+  if (!catalogCols.length) {
+    colMenu.innerHTML = '<div class="item" style="color:#999">Каталог пуст</div>';
+    return;
+  }
+  if (!currentCol || catalogCols.indexOf(currentCol) < 0) {
+    currentCol = catalogCols[0];
+    localStorage.setItem(COL_KEY, currentCol);
+  }
+  catalogCols.forEach(col => {
+    const lbl = document.createElement('label');
+    const inp = document.createElement('input');
+    inp.type = 'radio';
+    inp.name = 'col';
+    inp.checked = (col === currentCol);
+    inp.addEventListener('change', () => {
+      currentCol = col;
+      localStorage.setItem(COL_KEY, col);
+      if (currentScan) showCard(currentScan.value, currentScan.time);
+      menu.classList.remove('open');
+    });
+    const sp = document.createElement('span');
+    sp.textContent = col;
+    lbl.appendChild(inp);
+    lbl.appendChild(sp);
+    colMenu.appendChild(lbl);
+  });
+}
+
+function showCard(value, time) {
+  const row = catalogRows[value] || {};
+  const disp = row[currentCol] || '';
+  const productName = catalogNameCol ? (row[catalogNameCol] || '') : '';
+  currentScan = { value, time, display: disp };
+  cardCode.textContent = value;
+
+  if (productName && currentCol !== catalogNameCol) {
+    cardName.textContent = productName;
+    cardName.style.display = 'block';
+  } else {
+    cardName.style.display = 'none';
+  }
+
+  colName.textContent = currentCol || '—';
+  if (disp) {
+    cardValue.textContent = disp;
+    cardValue.className = 'value';
+  } else {
+    cardValue.textContent = 'Нет в каталоге';
+    cardValue.className = 'value missing';
+  }
+  card.style.display = 'block';
+}
+
+function setNumpad(v) {
+  numpad.style.display = v ? 'block' : 'none';
+  btnNumpad.classList.toggle('on', v);
+  try { localStorage.setItem(NUMPAD_KEY, v ? '1' : '0'); } catch (e) {}
+}
+function toggleNumpad() {
+  setNumpad(numpad.style.display === 'none');
+  focusInput();
+}
+function toggleMenu(e) {
+  e.stopPropagation();
+  menu.classList.toggle('open');
+}
+document.addEventListener('click', e => {
+  if (!menu.contains(e.target) && !e.target.classList.contains('b-menu')) {
+    menu.classList.remove('open');
+  }
+});
+function initNumpad() {
+  document.querySelectorAll('.numpad-btn').forEach(btn => {
+    btn.addEventListener('pointerdown', e => e.preventDefault());
+    btn.addEventListener('click', async () => {
+      const k = btn.dataset.k;
+      if (k === 'bs') {
+        input.value = input.value.slice(0, -1);
+      } else if (k === 'enter') {
+        const val = input.value.trim();
+        if (val) await handleScan(val);
+        else focusInput();
+        return;
+      } else {
+        input.value += k;
+      }
+      focusInput();
+    });
+  });
+  let saved = '0';
+  try { saved = localStorage.getItem(NUMPAD_KEY) || '0'; } catch (e) {}
+  setNumpad(saved === '1');
+}
+
+async function fetchCatalog() {
+  try {
+    const r = await fetchT('/api/catalog');
+    if (r.status === 401) { location.href = '/'; return false; }
+    if (!r.ok) return false;
+    const d = await r.json();
+    if (!d.ok) return false;
+    catalogCols = d.columns || [];
+    catalogRows = d.rows || {};
+    catalogNameCol = d.name_col || '';
+    buildColMenu();
+    return true;
+  } catch (e) { return false; }
+}
+async function fetchState() {
+  try {
+    const r = await fetchT('/api/state');
+    if (r.status === 401) { location.href = '/'; return false; }
+    if (!r.ok) return false;
+    const d = await r.json();
+    if (!d.ok) return false;
+    employee = { code: d.employee_code, name: d.employee_name || '' };
+    updateWho();
+    return true;
+  } catch (e) { return false; }
+}
+
+async function sendCompare(op, item) {
+  try {
+    const r = await fetchT('/api/' + op, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: item.value, time: item.time, display: item.display })
+    });
+    if (r.status === 401) { location.href = '/'; return false; }
+    const d = await r.json().catch(() => ({}));
+    return r.ok && d.ok;
+  } catch (e) { return false; }
+}
+async function flushQueue() {
+  if (!pendingQueue.length) return;
+  statusSaving();
+  while (pendingQueue.length) {
+    const item = pendingQueue[0];
+    const ok = await sendCompare(item.op, item);
+    if (!ok) { statusOffline(); return; }
+    pendingQueue.shift();
+  }
+  statusOk();
+}
+
+async function handleScan(value) {
+  const t = now();
+  showCard(value, t);
+  input.value = '';
+  beep(true);
+  focusInput();
+  pendingQueue.push({ op: 'check', value, time: t, display: currentScan.display });
+  await flushQueue();
+}
+
+async function markMismatch() {
+  if (!currentScan) return;
+  pendingQueue.push({ op: 'mismatch', value: currentScan.value,
+                      time: currentScan.time, display: currentScan.display });
+  await flushQueue();
+  focusInput();
+}
+
+async function switchUser() {
+  if (!confirm('Сменить пользователя?')) return;
+  try { await fetchT('/api/logout', { method: 'POST' }); } catch (e) {}
+  try { localStorage.removeItem(DIAG_KEY); } catch (e) {}
+  location.href = '/';
+}
+
+input.addEventListener('keydown', async e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const val = input.value.trim();
+    if (val) await handleScan(val);
+  }
+});
+document.addEventListener('click', e => {
+  const t = e.target;
+  if (t.tagName === 'INPUT' || t.tagName === 'BUTTON' || t.tagName === 'A') return;
+  if (t.closest && (t.closest('.numpad') || t.closest('.menu'))) return;
+  focusInput();
+});
+window.addEventListener('focus', focusInput);
+
+async function checkOnline() {
+  try {
+    const r = await fetchT('/api/ping');
+    if (r.status === 401) { location.href = '/'; return false; }
+    return r.ok;
+  } catch (e) { return false; }
+}
+setInterval(async () => {
+  const online = await checkOnline();
+  if (online) {
+    if (wasOffline) {
+      wasOffline = false;
+      queueDiag('offline_end');
+      await flushDiag();
+    }
+    await flushQueue();
+  } else {
+    if (!wasOffline) { wasOffline = true; queueDiag('offline_start'); }
+    statusOffline();
+  }
+}, RETRY_MS);
+
+(async function init() {
+  loadDiag();
+  initNumpad();
+  input.focus();
+  const okC = await fetchCatalog();
+  const okS = await fetchState();
+  if (!okC || !okS) {
+    wasOffline = true;
+    queueDiag('offline_start');
+    statusOffline();
+  } else {
+    await flushDiag();
+    statusOk();
+  }
+})();
+</script>
+</body>
+</html>

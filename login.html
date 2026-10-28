@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Вход — Piiicker</title>
+<link rel="stylesheet" href="/shared.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { max-width: 380px; width: 100%; padding: 28px 22px; }
+  h1 { font-size: 1.3rem; justify-content: center; }
+  .hint { font-size: 0.9rem; color: #666; text-align: center; margin-bottom: 20px; }
+  input { width: 100%; padding: 16px; font-size: 1.3rem;
+          font-family: "SFMono-Regular", Consolas, monospace;
+          text-align: center; letter-spacing: 2px;
+          border: 2px solid #ccd0d5; border-radius: 10px;
+          outline: none; background: #fafbfc; }
+  input:focus { border-color: #007bff; background: #fff; }
+  .btn-login { width: 100%; margin-top: 14px; padding: 16px;
+               font-size: 1.05rem; font-weight: 600;
+               background: #007bff; color: #fff; border: none;
+               border-radius: 10px; cursor: pointer; font-family: inherit; }
+  .btn-login:active { opacity: 0.85; }
+  .btn-login:disabled { opacity: 0.5; }
+  .err { margin-top: 12px; padding: 10px 12px; background: #f8d7da;
+         color: #721c24; border-radius: 8px; font-size: 0.9rem;
+         text-align: center; display: none; }
+  .err.show { display: block; }
+  .dev { margin-top: 14px; font-size: 0.75rem; color: #999; text-align: center;
+         font-family: "SFMono-Regular", Consolas, monospace; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>📝 Piiicker</h1>
+  <p class="hint">Введите код сотрудника</p>
+  <form id="form" autocomplete="off">
+    <input type="tel" id="code" inputmode="numeric" placeholder="Код"
+           maxlength="32" autofocus autocomplete="off">
+    <button class="btn-login" type="submit" id="btn">Войти</button>
+  </form>
+  <div class="err" id="err"></div>
+  <div class="dev" id="dev"></div>
+</div>
+<script>
+  const DEV_KEY = 'piiicker_device';
+  let deviceId = localStorage.getItem(DEV_KEY);
+  if (!deviceId) {
+    const r = () => Math.random().toString(36).slice(2, 6).toUpperCase();
+    deviceId = r() + '-' + r();
+    localStorage.setItem(DEV_KEY, deviceId);
+  }
+  document.getElementById('dev').textContent = 'Устройство: ' + deviceId;
+
+  const form = document.getElementById('form');
+  const code = document.getElementById('code');
+  const err  = document.getElementById('err');
+  const btn  = document.getElementById('btn');
+
+  fetch('/api/state', {credentials: 'same-origin'})
+    .then(r => { if (r.ok) location.href = '/tsd'; })
+    .catch(() => {});
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const c = code.value.trim();
+    if (!c) return;
+    err.classList.remove('show');
+    btn.disabled = true; btn.textContent = 'Проверка…';
+    try {
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Device-Id': deviceId},
+        credentials: 'same-origin',
+        body: JSON.stringify({code: c})
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.ok) { location.href = '/tsd'; return; }
+      err.textContent = d.error || 'Доступ запрещён';
+      err.classList.add('show');
+      code.value = ''; code.focus();
+    } catch (e) {
+      err.textContent = 'Нет соединения с сервером';
+      err.classList.add('show');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Войти';
+    }
+  });
+</script>
+</body>
+</html>
